@@ -1,0 +1,204 @@
+name: RDP
+# rdp by yamzz modified - lifetime via auto-restart + persistent data
+on:
+  workflow_dispatch:
+    inputs:
+      session_count:
+        description: 'Session ke- (otomatis diisi)'
+        required: false
+        default: '1'
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 355
+
+    steps:
+      - name: Configure Core RDP Settings By Yamzz
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          Restart-Service -Name TermService -Force
+
+      - name: Create RDP User with Secure Password
+        run: |
+          $username = "Rafi"
+          $password = "35151278"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member $username
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+          echo "RDP_CREDS=User: $username | Password: $password" >> $env:GITHUB_ENV
+          if (-not (Get-LocalUser -Name $username)) { exit 1 }
+
+      - name: Install Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      - name: Establish Tailscale Connection
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=github-rdp-runner --reset
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+          if (-not $tsIP) { exit 1 }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+      - name: Verify RDP Accessibility
+        run: |
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) { exit 1 }
+          Write-Host "TCP connectivity successful! IP: $env:TAILSCALE_IP"
+
+      # ============================================================
+      # RESTORE DATA dari session sebelumnya
+      # ============================================================
+      - name: Download Previous Session Data
+        uses: actions/download-artifact@v4
+        with:
+          name: rdp-session-data
+          path: C:\rdp-data
+        continue-on-error: true
+        # continue-on-error: true supaya tidak error di session pertama
+        # karena belum ada artifact yang tersimpan
+
+      - name: Restore Data to User Profile
+        run: |
+          $dataDir = "C:\rdp-data"
+          $userDesktop = "C:\Users\Rafi\Desktop"
+          $userDocs    = "C:\Users\Rafi\Documents"
+          $userDL      = "C:\Users\Rafi\Downloads"
+
+          # Buat folder user jika belum ada
+          New-Item -ItemType Directory -Force -Path $userDesktop | Out-Null
+          New-Item -ItemType Directory -Force -Path $userDocs    | Out-Null
+          New-Item -ItemType Directory -Force -Path $userDL      | Out-Null
+
+          if (Test-Path "$dataDir\Desktop") {
+              Write-Host "Restoring Desktop..."
+              Copy-Item "$dataDir\Desktop\*" -Destination $userDesktop -Recurse -Force
+          }
+          if (Test-Path "$dataDir\Documents") {
+              Write-Host "Restoring Documents..."
+              Copy-Item "$dataDir\Documents\*" -Destination $userDocs -Recurse -Force
+          }
+          if (Test-Path "$dataDir\Downloads") {
+              Write-Host "Restoring Downloads..."
+              Copy-Item "$dataDir\Downloads\*" -Destination $userDL -Recurse -Force
+          }
+
+          if (Test-Path $dataDir) {
+              $totalFiles = (Get-ChildItem $dataDir -Recurse -File).Count
+              Write-Host "Restore selesai! Total $totalFiles file dipulihkan."
+          } else {
+              Write-Host "Tidak ada data sebelumnya. Session pertama dimulai."
+          }
+
+      # ============================================================
+      # MAINTAIN CONNECTION + AUTO-SAVE + AUTO-RESTART
+      # ============================================================
+      - name: Maintain Connection & Auto-Save Data
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SESSION: ${{ github.event.inputs.session_count }}
+        run: |
+          Write-Host "`n=== RDP ACCESS (Session $env:SESSION) ==="
+          Write-Host "Address (IP)      : $env:TAILSCALE_IP"
+          Write-Host "Address (MagicDNS): github-rdp-runner"
+          Write-Host "Username          : Rafi"
+          Write-Host "Password          : 35151278"
+          Write-Host "Data tersimpan di : C:\rdp-data (otomatis sync)"
+          Write-Host "==================`n"
+
+          $nextSession = [int]$env:SESSION + 1
+          $deadline    = (Get-Date).AddMinutes(330) # Mulai save & restart di menit ke-330
+          $cycle       = 0
+
+          while ((Get-Date) -lt $deadline) {
+              $cycle++
+              $remaining = [math]::Round(($deadline - (Get-Date)).TotalMinutes, 1)
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Session $env:SESSION | Cycle $cycle | Sisa ~$remaining menit"
+              ping 100.100.100.100 -n 1 | Out-Null
+              Start-Sleep -Seconds 300
+          }
+
+          Write-Host "`n[PRE-SAVE] Menyimpan data sebelum restart..."
+
+          # Kumpulkan data dari profile user Rafi ke staging folder
+          $dataDir     = "C:\rdp-data"
+          $userDesktop = "C:\Users\Rafi\Desktop"
+          $userDocs    = "C:\Users\Rafi\Documents"
+          $userDL      = "C:\Users\Rafi\Downloads"
+
+          New-Item -ItemType Directory -Force -Path "$dataDir\Desktop"   | Out-Null
+          New-Item -ItemType Directory -Force -Path "$dataDir\Documents" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$dataDir\Downloads" | Out-Null
+
+          if (Test-Path $userDesktop) {
+              Copy-Item "$userDesktop\*" -Destination "$dataDir\Desktop" -Recurse -Force
+          }
+          if (Test-Path $userDocs) {
+              Copy-Item "$userDocs\*" -Destination "$dataDir\Documents" -Recurse -Force
+          }
+          if (Test-Path $userDL) {
+              Copy-Item "$userDL\*" -Destination "$dataDir\Downloads" -Recurse -Force
+          }
+
+          $totalFiles = (Get-ChildItem $dataDir -Recurse -File).Count
+          Write-Host "[PRE-SAVE] $totalFiles file siap di-upload sebagai artifact."
+
+      # ============================================================
+      # UPLOAD ARTIFACT (data disimpan ke GitHub)
+      # ============================================================
+      - name: Upload Session Data as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp-session-data
+          path: C:\rdp-data
+          overwrite: true
+          retention-days: 90
+        # retention-days: maksimal 90 hari, sesuaikan kebutuhan
+
+      # ============================================================
+      # TRIGGER SESSION BERIKUTNYA
+      # ============================================================
+      - name: Auto-Restart Next Session
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SESSION: ${{ github.event.inputs.session_count }}
+        run: |
+          $nextSession = [int]$env:SESSION + 1
+          Write-Host "[AUTO-RESTART] Memulai Session $nextSession..."
+
+          $workflowName = "rdp.yml" # <-- Sesuaikan nama file workflow kamu
+          $headers = @{
+              "Authorization"        = "Bearer $env:GH_TOKEN"
+              "Accept"               = "application/vnd.github+json"
+              "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          $body = @{
+              ref    = "${{ github.ref_name }}"
+              inputs = @{ session_count = "$nextSession" }
+          } | ConvertTo-Json
+
+          $url = "https://api.github.com/repos/$env:REPO/actions/workflows/$workflowName/dispatches"
+
+          try {
+              Invoke-RestMethod -Uri $url -Method Post -Headers $headers -Body $body -ContentType "application/json"
+              Write-Host "[AUTO-RESTART] Berhasil! Session $nextSession akan segera start."
+          } catch {
+              Write-Host "[AUTO-RESTART] Gagal: $_"
+          }

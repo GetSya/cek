@@ -25,16 +25,30 @@ jobs:
 
       - name: Create RDP User with Secure Password
         run: |
-          # Bypass password complexity via net user (lebih kompatibel)
-          net user Rafi 35151278 /add /expires:never /passwordchg:no
+          # Matikan password complexity & minimum length via secedit
+          $tmpCfg = "$env:TEMP\secpol.cfg"
+          $tmpDb  = "$env:TEMP\secedit.sdb"
+          secedit /export /cfg $tmpCfg /quiet
+          $cfg = Get-Content $tmpCfg
+          $cfg = $cfg -replace "PasswordComplexity\s*=\s*\d", "PasswordComplexity = 0"
+          $cfg = $cfg -replace "MinimumPasswordLength\s*=\s*\d+", "MinimumPasswordLength = 0"
+          Set-Content $tmpCfg $cfg
+          secedit /configure /db $tmpDb /cfg $tmpCfg /quiet
+          Start-Sleep -Seconds 2
+
+          # Buat user
+          net user Rafi "Rafi@1210" /add
           net localgroup Administrators Rafi /add
           net localgroup "Remote Desktop Users" Rafi /add
 
-          # Pastikan password tidak expire
-          wmic useraccount where "Name='Rafi'" set PasswordExpires=FALSE
+          # Set password never expires (tanpa wmic)
+          Set-LocalUser -Name "Rafi" -PasswordNeverExpires $true
 
-          echo "RDP_CREDS=User: Rafi | Password: 35151278" >> $env:GITHUB_ENV
-          Write-Host "User Rafi berhasil dibuat!"
+          # Verifikasi
+          $user = Get-LocalUser -Name "Rafi"
+          Write-Host "User dibuat: $($user.Name) | PasswordNeverExpires: $($user.PasswordNeverExpires)"
+
+          echo "RDP_CREDS=User: Rafi | Password: Rafi@1210" >> $env:GITHUB_ENV
 
       - name: Install Tailscale
         run: |
@@ -117,7 +131,7 @@ jobs:
           Write-Host "Address (IP)      : $env:TAILSCALE_IP"
           Write-Host "Address (MagicDNS): github-rdp-runner"
           Write-Host "Username          : Rafi"
-          Write-Host "Password          : 35151278"
+          Write-Host "Password          : Rafi@1210"
           Write-Host "Data tersimpan di : C:\rdp-data (otomatis sync)"
           Write-Host "==================`n"
 

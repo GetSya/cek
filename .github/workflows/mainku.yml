@@ -183,7 +183,7 @@ jobs:
           $nextSession = [int]$env:SESSION + 1
           Write-Host "[AUTO-RESTART] Memulai Session $nextSession..."
 
-          $workflowName = "rdp.yml" # <-- Sesuaikan nama file workflow kamu
+          $workflowName = "mainku.yml" # <-- Sesuaikan nama file workflow kamu
           $headers = @{
               "Authorization"        = "Bearer $env:GH_TOKEN"
               "Accept"               = "application/vnd.github+json"

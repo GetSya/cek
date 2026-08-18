@@ -1,4 +1,4 @@
-name: RDP_2
+name: RDP
 # rdp by yamzz modified - lifetime via auto-restart + persistent data
 on:
   workflow_dispatch:
@@ -25,14 +25,16 @@ jobs:
 
       - name: Create RDP User with Secure Password
         run: |
-          $username = "Rafi"
-          $password = "Rafi@1210"
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member $username
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
-          echo "RDP_CREDS=User: $username | Password: $password" >> $env:GITHUB_ENV
-          if (-not (Get-LocalUser -Name $username)) { exit 1 }
+          # Bypass password complexity via net user (lebih kompatibel)
+          net user Rafi 35151278 /add /expires:never /passwordchg:no
+          net localgroup Administrators Rafi /add
+          net localgroup "Remote Desktop Users" Rafi /add
+
+          # Pastikan password tidak expire
+          wmic useraccount where "Name='Rafi'" set PasswordExpires=FALSE
+
+          echo "RDP_CREDS=User: Rafi | Password: 35151278" >> $env:GITHUB_ENV
+          Write-Host "User Rafi berhasil dibuat!"
 
       - name: Install Tailscale
         run: |
@@ -70,17 +72,14 @@ jobs:
           name: rdp-session-data
           path: C:\rdp-data
         continue-on-error: true
-        # continue-on-error: true supaya tidak error di session pertama
-        # karena belum ada artifact yang tersimpan
 
       - name: Restore Data to User Profile
         run: |
-          $dataDir = "C:\rdp-data"
+          $dataDir     = "C:\rdp-data"
           $userDesktop = "C:\Users\Rafi\Desktop"
           $userDocs    = "C:\Users\Rafi\Documents"
           $userDL      = "C:\Users\Rafi\Downloads"
 
-          # Buat folder user jika belum ada
           New-Item -ItemType Directory -Force -Path $userDesktop | Out-Null
           New-Item -ItemType Directory -Force -Path $userDocs    | Out-Null
           New-Item -ItemType Directory -Force -Path $userDL      | Out-Null
@@ -118,12 +117,12 @@ jobs:
           Write-Host "Address (IP)      : $env:TAILSCALE_IP"
           Write-Host "Address (MagicDNS): github-rdp-runner"
           Write-Host "Username          : Rafi"
-          Write-Host "Password          : Rafi@1210"
+          Write-Host "Password          : 35151278"
           Write-Host "Data tersimpan di : C:\rdp-data (otomatis sync)"
           Write-Host "==================`n"
 
           $nextSession = [int]$env:SESSION + 1
-          $deadline    = (Get-Date).AddMinutes(330) # Mulai save & restart di menit ke-330
+          $deadline    = (Get-Date).AddMinutes(330)
           $cycle       = 0
 
           while ((Get-Date) -lt $deadline) {
@@ -136,7 +135,6 @@ jobs:
 
           Write-Host "`n[PRE-SAVE] Menyimpan data sebelum restart..."
 
-          # Kumpulkan data dari profile user Rafi ke staging folder
           $dataDir     = "C:\rdp-data"
           $userDesktop = "C:\Users\Rafi\Desktop"
           $userDocs    = "C:\Users\Rafi\Documents"
@@ -169,7 +167,6 @@ jobs:
           path: C:\rdp-data
           overwrite: true
           retention-days: 90
-        # retention-days: maksimal 90 hari, sesuaikan kebutuhan
 
       # ============================================================
       # TRIGGER SESSION BERIKUTNYA
@@ -183,7 +180,7 @@ jobs:
           $nextSession = [int]$env:SESSION + 1
           Write-Host "[AUTO-RESTART] Memulai Session $nextSession..."
 
-          $workflowName = "mainku.yml" # <-- Sesuaikan nama file workflow kamu
+          $workflowName = "mainku.yml"
           $headers = @{
               "Authorization"        = "Bearer $env:GH_TOKEN"
               "Accept"               = "application/vnd.github+json"

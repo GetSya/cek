@@ -1,5 +1,6 @@
 name: RDP
-# rdp by yamzz modified - lifetime via auto-restart + persistent data
+# RDP continuous session with full user profile persistence via robocopy & Node.js 21
+
 on:
   workflow_dispatch:
     inputs:
@@ -14,6 +15,11 @@ jobs:
     timeout-minutes: 355
 
     steps:
+      - name: Setup Node.js 21
+        uses: actions/setup-node@v4
+        with:
+          node-version: '21'
+
       - name: Configure Core RDP Settings By Yamzz
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
@@ -41,7 +47,7 @@ jobs:
           net localgroup Administrators Rafi /add
           net localgroup "Remote Desktop Users" Rafi /add
 
-          # Set password never expires (tanpa wmic)
+          # Set password never expires
           Set-LocalUser -Name "Rafi" -PasswordNeverExpires $true
 
           # Verifikasi
@@ -78,7 +84,7 @@ jobs:
           Write-Host "TCP connectivity successful! IP: $env:TAILSCALE_IP"
 
       # ============================================================
-      # RESTORE DATA dari session sebelumnya
+      # RESTORE DATA DARI SESSION SEBELUMNYA
       # ============================================================
       - name: Download Previous Session Data
         uses: actions/download-artifact@v4
@@ -90,36 +96,21 @@ jobs:
       - name: Restore Data to User Profile
         run: |
           $dataDir     = "C:\rdp-data"
-          $userDesktop = "C:\Users\Rafi\Desktop"
-          $userDocs    = "C:\Users\Rafi\Documents"
-          $userDL      = "C:\Users\Rafi\Downloads"
+          $userProfile = "C:\Users\Rafi"
 
-          New-Item -ItemType Directory -Force -Path $userDesktop | Out-Null
-          New-Item -ItemType Directory -Force -Path $userDocs    | Out-Null
-          New-Item -ItemType Directory -Force -Path $userDL      | Out-Null
+          New-Item -ItemType Directory -Force -Path $userProfile | Out-Null
 
-          if (Test-Path "$dataDir\Desktop") {
-              Write-Host "Restoring Desktop..."
-              Copy-Item "$dataDir\Desktop\*" -Destination $userDesktop -Recurse -Force
-          }
-          if (Test-Path "$dataDir\Documents") {
-              Write-Host "Restoring Documents..."
-              Copy-Item "$dataDir\Documents\*" -Destination $userDocs -Recurse -Force
-          }
-          if (Test-Path "$dataDir\Downloads") {
-              Write-Host "Restoring Downloads..."
-              Copy-Item "$dataDir\Downloads\*" -Destination $userDL -Recurse -Force
-          }
-
-          if (Test-Path $dataDir) {
-              $totalFiles = (Get-ChildItem $dataDir -Recurse -File).Count
-              Write-Host "Restore selesai! Total $totalFiles file dipulihkan."
+          if (Test-Path "$dataDir\UserProfile") {
+              Write-Host "Memulai proses restore seluruh User Profile..."
+              # Robocopy menyalin data kembali ke C:\Users\Rafi
+              robocopy "$dataDir\UserProfile" $userProfile /E /ZB /R:1 /W:1
+              Write-Host "Restore User Profile selesai!"
           } else {
-              Write-Host "Tidak ada data sebelumnya. Session pertama dimulai."
+              Write-Host "Tidak ada backup sebelumnya. Menjalankan sesi pertama."
           }
 
       # ============================================================
-      # MAINTAIN CONNECTION + AUTO-SAVE + AUTO-RESTART
+      # MAINTAIN CONNECTION + AUTO-SAVE DATA
       # ============================================================
       - name: Maintain Connection & Auto-Save Data
         env:
@@ -132,13 +123,14 @@ jobs:
           Write-Host "Address (MagicDNS): github-rdp-runner"
           Write-Host "Username          : Rafi"
           Write-Host "Password          : Rafi@1210"
-          Write-Host "Data tersimpan di : C:\rdp-data (otomatis sync)"
+          Write-Host "Node.js Version   : $(node -v)"
+          Write-Host "Data tersimpan di : C:\Users\Rafi (otomatis dikemas)"
           Write-Host "==================`n"
 
-          $nextSession = [int]$env:SESSION + 1
-          $deadline    = (Get-Date).AddMinutes(330)
-          $cycle       = 0
+          $deadline = (Get-Date).AddMinutes(330)
+          $cycle    = 0
 
+          # Loop bertahan hingga menit ke-330 (5.5 jam)
           while ((Get-Date) -lt $deadline) {
               $cycle++
               $remaining = [math]::Round(($deadline - (Get-Date)).TotalMinutes, 1)
@@ -147,32 +139,21 @@ jobs:
               Start-Sleep -Seconds 300
           }
 
-          Write-Host "`n[PRE-SAVE] Menyimpan data sebelum restart..."
+          Write-Host "`n[PRE-SAVE] Menyimpan seluruh data profil user Rafi..."
 
           $dataDir     = "C:\rdp-data"
-          $userDesktop = "C:\Users\Rafi\Desktop"
-          $userDocs    = "C:\Users\Rafi\Documents"
-          $userDL      = "C:\Users\Rafi\Downloads"
+          $userProfile = "C:\Users\Rafi"
 
-          New-Item -ItemType Directory -Force -Path "$dataDir\Desktop"   | Out-Null
-          New-Item -ItemType Directory -Force -Path "$dataDir\Documents" | Out-Null
-          New-Item -ItemType Directory -Force -Path "$dataDir\Downloads" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$dataDir\UserProfile" | Out-Null
 
-          if (Test-Path $userDesktop) {
-              Copy-Item "$userDesktop\*" -Destination "$dataDir\Desktop" -Recurse -Force
-          }
-          if (Test-Path $userDocs) {
-              Copy-Item "$userDocs\*" -Destination "$dataDir\Documents" -Recurse -Force
-          }
-          if (Test-Path $userDL) {
-              Copy-Item "$userDL\*" -Destination "$dataDir\Downloads" -Recurse -Force
-          }
+          # Robocopy backup seluruh folder user (mengabaikan temp/locked windows system files)
+          robocopy $userProfile "$dataDir\UserProfile" /E /ZB /R:1 /W:1 /XF NTUSER.DAT* parent.lock /XD "AppData\Local\Temp" "AppData\Local\Microsoft\Windows"
 
-          $totalFiles = (Get-ChildItem $dataDir -Recurse -File).Count
-          Write-Host "[PRE-SAVE] $totalFiles file siap di-upload sebagai artifact."
+          $totalFiles = (Get-ChildItem "$dataDir\UserProfile" -Recurse -File -ErrorAction SilentlyContinue).Count
+          Write-Host "[PRE-SAVE] Total $totalFiles file siap di-upload ke artifact."
 
       # ============================================================
-      # UPLOAD ARTIFACT (data disimpan ke GitHub)
+      # UPLOAD ARTIFACT (Data disimpan ke GitHub)
       # ============================================================
       - name: Upload Session Data as Artifact
         uses: actions/upload-artifact@v4
@@ -211,5 +192,5 @@ jobs:
               Invoke-RestMethod -Uri $url -Method Post -Headers $headers -Body $body -ContentType "application/json"
               Write-Host "[AUTO-RESTART] Berhasil! Session $nextSession akan segera start."
           } catch {
-              Write-Host "[AUTO-RESTART] Gagal: $_"
+              Write-Host "[AUTO-RESTART] Gagal memicu restart: $_"
           }

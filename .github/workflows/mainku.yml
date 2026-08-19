@@ -11,7 +11,7 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 355
+    timeout-minutes: 50000
     permissions:
       actions: write   # ← FIX: izinkan trigger workflow dispatch
       contents: read
